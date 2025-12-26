@@ -1,0 +1,210 @@
+import uuid
+import streamlit as st
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from langraph_rag_backend import (
+    chatbot,
+    ingest_pdf,
+    retrieve_all_threads,
+    thread_document_metadata,
+    delete_thread,
+)
+
+# =========================== Utilities ===========================
+
+def generate_thread_id():
+    return str(uuid.uuid4())
+
+
+def extract_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict)
+        )
+    return ""
+
+
+def add_thread(thread_id):
+    if thread_id not in st.session_state["chat_threads"]:
+        st.session_state["chat_threads"].append(thread_id)
+
+
+def reset_chat():
+    new_id = generate_thread_id()
+    st.session_state["thread_id"] = new_id
+    add_thread(new_id)
+    st.session_state["message_history"] = []
+
+
+def load_conversation(thread_id):
+    state = chatbot.get_state(
+        config={"configurable": {"thread_id": thread_id}}
+    )
+    return state.values.get("messages", [])
+
+
+# ======================= Session Initialization ===================
+
+if "message_history" not in st.session_state:
+    st.session_state["message_history"] = []
+
+if "thread_id" not in st.session_state:
+    st.session_state["thread_id"] = generate_thread_id()
+
+if "chat_threads" not in st.session_state:
+    st.session_state["chat_threads"] = retrieve_all_threads()
+
+if "ingested_docs" not in st.session_state:
+    st.session_state["ingested_docs"] = {}
+
+add_thread(st.session_state["thread_id"])
+
+thread_key = str(st.session_state["thread_id"])
+thread_docs = st.session_state["ingested_docs"].setdefault(thread_key, {})
+threads = list(reversed(st.session_state["chat_threads"]))
+selected_thread = None
+
+# ============================ Sidebar ============================
+
+st.sidebar.title("📄 PDF Chatbot")
+st.sidebar.markdown(f"**Thread ID:** `{thread_key}`")
+
+if st.sidebar.button("➕ New Chat", use_container_width=True):
+    reset_chat()
+    st.rerun()
+
+if thread_docs:
+    latest_doc = list(thread_docs.values())[-1]
+    st.sidebar.success(
+        f"Using `{latest_doc['filename']}`\n"
+        f"{latest_doc['chunks']} chunks • {latest_doc['documents']} pages"
+    )
+else:
+    st.sidebar.info("No PDF indexed yet.")
+uploaded_pdf = st.sidebar.file_uploader(
+    "Upload a PDF for this chat",
+    type=["pdf"],
+)
+
+if uploaded_pdf:
+    if uploaded_pdf.name in thread_docs:
+        st.sidebar.info(f"`{uploaded_pdf.name}` already indexed.")
+    else:
+        with st.spinner("Indexing PDF..."):
+            summary = ingest_pdf(
+                uploaded_pdf.getvalue(),
+                thread_id=thread_key,
+                filename=uploaded_pdf.name,
+            )
+            thread_docs[uploaded_pdf.name] = summary
+
+        st.sidebar.success("PDF indexed successfully")
+
+
+# ====================== Past Conversations ======================
+
+st.sidebar.subheader("🕘 Past Conversations")
+
+if not threads:
+    st.sidebar.write("No past conversations yet.")
+else:
+    for tid in threads:
+        col1, col2 = st.sidebar.columns([6, 1])
+
+        if col1.button(tid, key=f"load-{tid}"):
+            selected_thread = tid
+
+        if col2.button("🗑", key=f"delete-{tid}"):
+            if delete_thread(tid):
+                st.session_state["chat_threads"].remove(tid)
+                st.session_state["ingested_docs"].pop(tid, None)
+
+                if tid == thread_key:
+                    reset_chat()
+
+                st.sidebar.success("Conversation deleted")
+                st.rerun()
+            else:
+                st.sidebar.error("Delete failed")
+
+# ============================ Main UI ============================
+
+st.title("🤖 AI Chatbot")
+
+for msg in st.session_state["message_history"]:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+user_input = st.chat_input("Ask about your document or anything else...")
+
+# ============================ Chat Handling ============================
+
+if user_input:
+    st.session_state["message_history"].append(
+        {"role": "user", "content": user_input}
+    )
+
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    CONFIG = {
+        "configurable": {"thread_id": thread_key},
+        "metadata": {"thread_id": thread_key},
+        "run_name": "chat_turn",
+    }
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+
+            def ai_only_stream():
+                full_text = ""
+                for message_chunk, _ in chatbot.stream(
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config=CONFIG,
+                    stream_mode="messages",
+                ):
+                    if isinstance(message_chunk, ToolMessage):
+                        continue
+
+                    if isinstance(message_chunk, AIMessage):
+                        text = extract_text(message_chunk.content)
+                        if text:
+                            full_text += text
+                            yield text
+                return full_text
+
+            ai_message = st.write_stream(ai_only_stream())
+
+    st.session_state["message_history"].append(
+        {"role": "assistant", "content": ai_message}
+    )
+
+    doc_meta = thread_document_metadata(thread_key)
+    if doc_meta:
+        st.caption(
+            f"📄 `{doc_meta['filename']}` • "
+            f"{doc_meta['chunks']} chunks • "
+            f"{doc_meta['documents']} pages"
+        )
+
+# ============================ Load Old Thread ============================
+
+if selected_thread:
+    st.session_state["thread_id"] = selected_thread
+
+    messages = load_conversation(selected_thread)
+    cleaned = []
+
+    for msg in messages:
+        role = "user" if isinstance(msg, HumanMessage) else "assistant"
+        cleaned.append(
+            {"role": role, "content": extract_text(msg.content)}
+        )
+
+    st.session_state["message_history"] = cleaned
+    st.session_state["ingested_docs"].setdefault(selected_thread, {})
+    st.rerun()
