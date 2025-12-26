@@ -24,12 +24,12 @@ from langgraph.prebuilt import ToolNode, tools_condition
 import requests
 
 # --------------------------------------------------
-# ENV
+# ENV (Streamlit Secrets will override this)
 # --------------------------------------------------
 load_dotenv()
 
 # --------------------------------------------------
-# LLM (chat only)
+# LLM
 # --------------------------------------------------
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
@@ -37,14 +37,14 @@ llm = ChatGoogleGenerativeAI(
 )
 
 # --------------------------------------------------
-# LOCAL embeddings (NO API / NO quota)
+# Local embeddings (NO API)
 # --------------------------------------------------
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
 # --------------------------------------------------
-# Thread stores (in-memory)
+# In-memory thread stores
 # --------------------------------------------------
 _THREAD_RETRIEVERS: Dict[str, Any] = {}
 _THREAD_METADATA: Dict[str, dict] = {}
@@ -58,9 +58,6 @@ def _get_retriever(thread_id: Optional[str]):
 # PDF ingestion
 # --------------------------------------------------
 def ingest_pdf(file_bytes: bytes, thread_id: str, filename: str) -> dict:
-    if not file_bytes:
-        raise ValueError("No file bytes received")
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as f:
         f.write(file_bytes)
         path = f.name
@@ -98,37 +95,29 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: str) -> dict:
 # --------------------------------------------------
 @tool
 def calculator(first_num: float, second_num: float, operation: str) -> dict:
-    """Perform basic arithmetic: add, sub, mul, div."""
-    try:
-        if operation == "add":
-            return {"result": first_num + second_num}
-        if operation == "sub":
-            return {"result": first_num - second_num}
-        if operation == "mul":
-            return {"result": first_num * second_num}
-        if operation == "div":
-            if second_num == 0:
-                return {"error": "Division by zero"}
-            return {"result": first_num / second_num}
-        return {"error": "Invalid operation"}
-    except Exception as e:
-        return {"error": str(e)}
+    """Basic arithmetic: add, sub, mul, div."""
+    if operation == "add":
+        return {"result": first_num + second_num}
+    if operation == "sub":
+        return {"result": first_num - second_num}
+    if operation == "mul":
+        return {"result": first_num * second_num}
+    if operation == "div":
+        if second_num == 0:
+            return {"error": "Division by zero"}
+        return {"result": first_num / second_num}
+    return {"error": "Invalid operation"}
 
 @tool
 def get_stock_price(symbol: str) -> dict:
-    """Get stock price from Alpha Vantage."""
     url = (
         "https://www.alphavantage.co/query"
         f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey=C9PE94QUEW9VWGFM"
     )
-    return requests.get(url).json()
+    return requests.get(url, timeout=10).json()
 
 @tool
 def rag_tool(query: str, thread_id: str) -> dict:
-    """
-    Retrieve information from the uploaded PDF.
-    thread_id is injected automatically by the system.
-    """
     retriever = _get_retriever(thread_id)
     if retriever is None:
         return {"error": "No PDF indexed for this chat"}
