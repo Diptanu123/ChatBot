@@ -228,8 +228,6 @@ if user_input and not st.session_state.get("processing", False):
     # Prepare config
     CONFIG = {
         "configurable": {"thread_id": thread_key},
-        "metadata": {"thread_id": thread_key},
-        "run_name": "chat_turn",
     }
 
     # Generate AI response
@@ -237,24 +235,32 @@ if user_input and not st.session_state.get("processing", False):
         response_placeholder = st.empty()
         
         try:
-            # Use invoke instead of stream for more reliability
+            # Show thinking indicator
+            response_placeholder.markdown("🤔 Thinking...")
+            
+            # Invoke the chatbot
             result = chatbot.invoke(
                 {"messages": [HumanMessage(content=user_input)]},
-                config=CONFIG
+                config=CONFIG,
+                debug=True  # Enable debug mode
             )
             
             # Extract the final AI message
             ai_response = ""
             if result and "messages" in result:
+                # Look through messages from most recent
                 for msg in reversed(result["messages"]):
                     if isinstance(msg, AIMessage):
-                        ai_response = extract_text(msg.content)
-                        if ai_response:
+                        text = extract_text(msg.content)
+                        if text and not text.startswith("tool_"):
+                            ai_response = text
                             break
             
+            # Fallback if no response
             if not ai_response:
-                ai_response = "I apologize, but I couldn't generate a response. Please try again."
+                ai_response = "I apologize, but I couldn't generate a response. Please try rephrasing your question."
             
+            # Display the response
             response_placeholder.markdown(ai_response)
             
             # Add to history
@@ -274,7 +280,14 @@ if user_input and not st.session_state.get("processing", False):
         except Exception as e:
             error_msg = f"❌ Error: {str(e)}"
             st.error(error_msg)
-            st.error("Please check your API key and try again.")
+            
+            # Show detailed error for debugging
+            with st.expander("🔍 Debug Information"):
+                st.write("**Error Type:**", type(e).__name__)
+                st.write("**Error Message:**", str(e))
+                st.write("**Thread ID:**", thread_key)
+                import traceback
+                st.code(traceback.format_exc())
             
             # Remove the user message on error
             if st.session_state["message_history"] and st.session_state["message_history"][-1]["role"] == "user":
