@@ -46,9 +46,13 @@ llm = ChatGoogleGenerativeAI(
 # --------------------------------------------------
 # Local embeddings (NO API)
 # --------------------------------------------------
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+@st.cache_resource
+def get_embeddings():
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+embeddings = get_embeddings()
 
 # --------------------------------------------------
 # In-memory thread stores
@@ -159,13 +163,16 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
 
     retriever = _get_retriever(thread_id)
     if retriever is None:
-        return {"error": "No PDF indexed for this chat"}
+        return {"error": "No PDF indexed for this chat. Please upload a PDF first."}
 
-    docs = retriever.invoke(query)
-    return {
-        "answer": "\n\n".join(d.page_content for d in docs),
-        "source": _THREAD_METADATA.get(str(thread_id), {}).get("filename"),
-    }
+    try:
+        docs = retriever.invoke(query)
+        return {
+            "answer": "\n\n".join(d.page_content for d in docs),
+            "source": _THREAD_METADATA.get(str(thread_id), {}).get("filename"),
+        }
+    except Exception as e:
+        return {"error": f"Error retrieving information: {str(e)}"}
 
 
 tools = [calculator, get_stock_price, rag_tool]
@@ -185,13 +192,21 @@ def chat_node(state: ChatState, config=None):
     if config and "configurable" in config:
         thread_id = config["configurable"].get("thread_id")
 
+    has_pdf = thread_id and _get_retriever(thread_id) is not None
+    pdf_info = ""
+    if has_pdf:
+        meta = _THREAD_METADATA.get(str(thread_id), {})
+        pdf_info = f"\nA PDF document '{meta.get('filename', 'unknown')}' has been uploaded. Use rag_tool to answer questions about it."
+
     system = SystemMessage(
         content=(
-            "You are a helpful assistant.\n"
+            "You are a helpful AI assistant with access to tools.\n"
             f"Current thread_id: {thread_id}\n"
-            "If the user asks about the uploaded PDF, "
-            "you MUST call rag_tool using this thread_id.\n"
-            "NEVER ask the user for thread_id."
+            f"{pdf_info}\n"
+            "When users ask about documents, uploaded files, or PDFs, use the rag_tool.\n"
+            "For calculations, use the calculator tool.\n"
+            "For stock prices, use the get_stock_price tool.\n"
+            "Always be helpful and friendly."
         )
     )
 
@@ -204,25 +219,32 @@ def chat_node(state: ChatState, config=None):
 tool_node = ToolNode(tools)
 
 # --------------------------------------------------
-# Persistence
+# Persistence - Initialize database properly
 # --------------------------------------------------
-# Use a persistent path for Streamlit Cloud
-db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
-conn = sqlite3.connect(db_path, check_same_thread=False)
-checkpointer = SqliteSaver(conn)
+@st.cache_resource
+def get_checkpointer():
+    db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    return SqliteSaver(conn), conn
+
+checkpointer, conn = get_checkpointer()
 
 # --------------------------------------------------
 # Graph
 # --------------------------------------------------
-graph = StateGraph(ChatState)
-graph.add_node("chat_node", chat_node)
-graph.add_node("tools", tool_node)
+@st.cache_resource
+def build_graph():
+    graph = StateGraph(ChatState)
+    graph.add_node("chat_node", chat_node)
+    graph.add_node("tools", tool_node)
 
-graph.add_edge(START, "chat_node")
-graph.add_conditional_edges("chat_node", tools_condition)
-graph.add_edge("tools", "chat_node")
+    graph.add_edge(START, "chat_node")
+    graph.add_conditional_edges("chat_node", tools_condition)
+    graph.add_edge("tools", "chat_node")
 
-chatbot = graph.compile(checkpointer=checkpointer)
+    return graph.compile(checkpointer=checkpointer)
+
+chatbot = build_graph()
 
 # --------------------------------------------------
 # Helpers
@@ -234,25 +256,48 @@ def retrieve_all_threads():
             cfg = cp.config.get("configurable")
             if cfg and "thread_id" in cfg:
                 threads.add(cfg["thread_id"])
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Error retrieving threads: {e}")
     return list(threads)
 
 def thread_document_metadata(thread_id: str):
     return _THREAD_METADATA.get(str(thread_id), {})
 
 def delete_thread(thread_id: str) -> bool:
+    """Delete a thread from the database and memory."""
     try:
         cursor = conn.cursor()
+        
+        # Delete from checkpoints table
+        cursor.execute(
+            "DELETE FROM checkpoints WHERE thread_id = ?",
+            (thread_id,)
+        )
+        
+        # Also try the JSON extract method as fallback
         cursor.execute(
             "DELETE FROM checkpoints "
             "WHERE json_extract(config, '$.configurable.thread_id') = ?",
             (thread_id,),
         )
+        
+        # Delete from writes table if it exists
+        try:
+            cursor.execute(
+                "DELETE FROM writes WHERE thread_id = ?",
+                (thread_id,)
+            )
+        except sqlite3.OperationalError:
+            pass  # writes table might not exist
+        
         conn.commit()
-    except Exception:
+        
+        # Clean up memory
+        _THREAD_RETRIEVERS.pop(str(thread_id), None)
+        _THREAD_METADATA.pop(str(thread_id), None)
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error deleting thread: {e}")
         return False
-
-    _THREAD_RETRIEVERS.pop(str(thread_id), None)
-    _THREAD_METADATA.pop(str(thread_id), None)
-    return cursor.rowcount > 0
