@@ -13,6 +13,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -22,18 +23,24 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 import requests
+import streamlit as st
 
 # --------------------------------------------------
 # ENV (Streamlit Secrets will override this)
 # --------------------------------------------------
 load_dotenv()
 
+# Get API key from Streamlit secrets or environment
+GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
+ALPHA_VANTAGE_KEY = st.secrets.get("ALPHA_VANTAGE_KEY", os.getenv("ALPHA_VANTAGE_KEY", "C9PE94QUEW9VWGFM"))
+
 # --------------------------------------------------
 # LLM
 # --------------------------------------------------
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-2.0-flash-exp",
     temperature=0,
+    google_api_key=GOOGLE_API_KEY,
 )
 
 # --------------------------------------------------
@@ -95,7 +102,16 @@ def ingest_pdf(file_bytes: bytes, thread_id: str, filename: str) -> dict:
 # --------------------------------------------------
 @tool
 def calculator(first_num: float, second_num: float, operation: str) -> dict:
-    """Basic arithmetic: add, sub, mul, div."""
+    """Basic arithmetic calculator.
+    
+    Args:
+        first_num: The first number
+        second_num: The second number
+        operation: Operation to perform - 'add', 'sub', 'mul', or 'div'
+    
+    Returns:
+        Dictionary with 'result' key or 'error' key
+    """
     if operation == "add":
         return {"result": first_num + second_num}
     if operation == "sub":
@@ -110,21 +126,35 @@ def calculator(first_num: float, second_num: float, operation: str) -> dict:
 
 @tool
 def get_stock_price(symbol: str) -> dict:
+    """Get current stock price for a given symbol.
+    
+    Args:
+        symbol: Stock ticker symbol (e.g., 'AAPL', 'GOOGL')
+    
+    Returns:
+        Dictionary with stock price information
+    """
     url = (
         "https://www.alphavantage.co/query"
-        f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey=C9PE94QUEW9VWGFM"
+        f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}"
     )
-    return requests.get(url, timeout=10).json()
+    try:
+        response = requests.get(url, timeout=10)
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 @tool
-def rag_tool(query: str) -> dict:
+def rag_tool(query: str, config: RunnableConfig) -> dict:
+    """Retrieve information from the uploaded PDF for the current conversation.
+    
+    Args:
+        query: The search query to find relevant information
+        config: The configuration containing thread_id
+    
+    Returns:
+        Dictionary with answer and source filename
     """
-    Retrieve information from the uploaded PDF for the current conversation.
-    """
-    # thread_id is injected via LangGraph config
-    from langchain_core.runnables import RunnableConfig
-
-    config = RunnableConfig.get_current()
     thread_id = config.get("configurable", {}).get("thread_id")
 
     retriever = _get_retriever(thread_id)
@@ -176,7 +206,9 @@ tool_node = ToolNode(tools)
 # --------------------------------------------------
 # Persistence
 # --------------------------------------------------
-conn = sqlite3.connect("chatbot.db", check_same_thread=False)
+# Use a persistent path for Streamlit Cloud
+db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
+conn = sqlite3.connect(db_path, check_same_thread=False)
 checkpointer = SqliteSaver(conn)
 
 # --------------------------------------------------
@@ -197,10 +229,13 @@ chatbot = graph.compile(checkpointer=checkpointer)
 # --------------------------------------------------
 def retrieve_all_threads():
     threads = set()
-    for cp in checkpointer.list(None):
-        cfg = cp.config.get("configurable")
-        if cfg and "thread_id" in cfg:
-            threads.add(cfg["thread_id"])
+    try:
+        for cp in checkpointer.list(None):
+            cfg = cp.config.get("configurable")
+            if cfg and "thread_id" in cfg:
+                threads.add(cfg["thread_id"])
+    except Exception:
+        pass
     return list(threads)
 
 def thread_document_metadata(thread_id: str):
