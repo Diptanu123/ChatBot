@@ -30,8 +30,9 @@ def extract_text(content):
         return content
     if isinstance(content, list):
         return "".join(
-            block.get("text", "") if isinstance(block, dict) else str(block)
+            block.get("text", "")
             for block in content
+            if isinstance(block, dict)
         )
     return ""
 
@@ -216,82 +217,66 @@ user_input = st.chat_input(
 if user_input and not st.session_state.get("processing", False):
     st.session_state["processing"] = True
     
-    # Add user message immediately
+    # Add user message
     st.session_state["message_history"].append(
         {"role": "user", "content": user_input}
     )
 
-    # Display user message
     with st.chat_message("user"):
         st.markdown(user_input)
 
     # Prepare config
     CONFIG = {
         "configurable": {"thread_id": thread_key},
+        "metadata": {"thread_id": thread_key},
+        "run_name": "chat_turn",
     }
 
     # Generate AI response
     with st.chat_message("assistant"):
-        response_placeholder = st.empty()
-        
-        try:
-            # Show thinking indicator
-            response_placeholder.markdown("🤔 Thinking...")
-            
-            # Invoke the chatbot
-            result = chatbot.invoke(
-                {"messages": [HumanMessage(content=user_input)]},
-                config=CONFIG,
-                debug=True  # Enable debug mode
-            )
-            
-            # Extract the final AI message
-            ai_response = ""
-            if result and "messages" in result:
-                # Look through messages from most recent
-                for msg in reversed(result["messages"]):
-                    if isinstance(msg, AIMessage):
-                        text = extract_text(msg.content)
-                        if text and not text.startswith("tool_"):
-                            ai_response = text
-                            break
-            
-            # Fallback if no response
-            if not ai_response:
-                ai_response = "I apologize, but I couldn't generate a response. Please try rephrasing your question."
-            
-            # Display the response
-            response_placeholder.markdown(ai_response)
-            
-            # Add to history
-            st.session_state["message_history"].append(
-                {"role": "assistant", "content": ai_response}
-            )
+        with st.spinner("🤔 Thinking..."):
+            try:
+                full_response = ""
+                placeholder = st.empty()
+                
+                for message_chunk, _ in chatbot.stream(
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config=CONFIG,
+                    stream_mode="messages",
+                ):
+                    # Skip tool messages
+                    if isinstance(message_chunk, ToolMessage):
+                        continue
 
-            # Show document info if available
-            doc_meta = thread_document_metadata(thread_key)
-            if doc_meta:
-                st.caption(
-                    f"📄 `{doc_meta['filename']}` • "
-                    f"{doc_meta['chunks']} chunks • "
-                    f"{doc_meta['documents']} pages"
+                    # Process AI messages
+                    if isinstance(message_chunk, AIMessage):
+                        text = extract_text(message_chunk.content)
+                        if text:
+                            full_response += text
+                            placeholder.markdown(full_response + "▌")
+                
+                placeholder.markdown(full_response)
+
+                # Add to history
+                st.session_state["message_history"].append(
+                    {"role": "assistant", "content": full_response}
                 )
 
-        except Exception as e:
-            error_msg = f"❌ Error: {str(e)}"
-            st.error(error_msg)
-            
-            # Show detailed error for debugging
-            with st.expander("🔍 Debug Information"):
-                st.write("**Error Type:**", type(e).__name__)
-                st.write("**Error Message:**", str(e))
-                st.write("**Thread ID:**", thread_key)
-                import traceback
-                st.code(traceback.format_exc())
-            
-            # Remove the user message on error
-            if st.session_state["message_history"] and st.session_state["message_history"][-1]["role"] == "user":
-                st.session_state["message_history"].pop()
+                # Show document info if available
+                doc_meta = thread_document_metadata(thread_key)
+                if doc_meta:
+                    st.caption(
+                        f"📄 `{doc_meta['filename']}` • "
+                        f"{doc_meta['chunks']} chunks • "
+                        f"{doc_meta['documents']} pages"
+                    )
+
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                st.error("Please check if your Google API key is set correctly in Streamlit secrets.")
+                # Remove the failed user message
+                if st.session_state["message_history"][-1]["role"] == "user":
+                    st.session_state["message_history"].pop()
     
     st.session_state["processing"] = False
     st.rerun()
