@@ -1,5 +1,6 @@
 import uuid
 import streamlit as st
+import os
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from langraph_rag_backend import (
@@ -48,6 +49,7 @@ def reset_chat():
     st.session_state["thread_id"] = new_id
     add_thread(new_id)
     st.session_state["message_history"] = []
+    st.session_state["processing"] = False  # Ensure processing is reset
 
 
 def load_conversation(thread_id):
@@ -92,6 +94,7 @@ st.sidebar.title("📄 PDF Chatbot")
 st.sidebar.markdown(f"**Thread ID:** `{thread_key[:8]}...`")
 
 if st.sidebar.button("➕ New Chat", use_container_width=True):
+    st.session_state["processing"] = False  # Reset processing state
     reset_chat()
     st.rerun()
 
@@ -154,6 +157,7 @@ else:
                     st.session_state["ingested_docs"].pop(tid, None)
 
                     if tid == thread_key:
+                        st.session_state["processing"] = False  # Reset processing
                         reset_chat()
 
                     st.sidebar.success("✅ Deleted")
@@ -165,6 +169,10 @@ else:
 
 st.title("🤖 AI Chatbot")
 st.caption("Ask questions about your documents or anything else!")
+
+# Debug indicator (remove after testing)
+if st.session_state.get("processing", False):
+    st.warning("⏳ Processing... Please wait")
 
 # Check if API key is configured
 if not st.secrets.get("GOOGLE_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
@@ -184,10 +192,19 @@ for msg in st.session_state["message_history"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# Safety check: Reset processing if no active operation
+if st.session_state.get("processing", False):
+    if len(st.session_state.get("message_history", [])) > 0:
+        last_msg = st.session_state["message_history"][-1]
+        # If last message is from user and processing is true, reset it
+        if last_msg.get("role") == "assistant":
+            st.session_state["processing"] = False
+
 # Chat input
 user_input = st.chat_input(
     "Ask about your document or anything else...",
-    disabled=st.session_state.get("processing", False)
+    disabled=st.session_state.get("processing", False),
+    key=f"chat_input_{thread_key}"  # Unique key per thread
 )
 
 # ============================ Chat Handling ============================
@@ -261,6 +278,7 @@ if user_input and not st.session_state.get("processing", False):
 
 if selected_thread:
     st.session_state["thread_id"] = selected_thread
+    st.session_state["processing"] = False  # Reset processing state
 
     messages = load_conversation(selected_thread)
     cleaned = []
