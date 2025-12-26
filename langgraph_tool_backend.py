@@ -1,106 +1,89 @@
 # backend.py
 
-from langgraph.graph import StateGraph, START, END
-from typing import TypedDict, Annotated
-from langchain_core.messages import BaseMessage, HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.tools import tool
-from dotenv import load_dotenv
+from typing import TypedDict, Annotated, List
 import sqlite3
 import requests
+from dotenv import load_dotenv
 
+from langgraph.graph import StateGraph, START
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.checkpoint.sqlite import SqliteSaver
+
+from langchain_core.messages import BaseMessage
+from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# --------------------------------------------------
+# ENV
+# --------------------------------------------------
 load_dotenv()
 
-# -------------------
+# --------------------------------------------------
 # 1. LLM (Gemini)
-# -------------------
+# --------------------------------------------------
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0
 )
 
-# -------------------
-# 2. Tools
-# -------------------
-search_tool = DuckDuckGoSearchRun(region="us-en")
+# --------------------------------------------------
+# 2. Tools (NO DuckDuckGo ❌)
+# --------------------------------------------------
 
 @tool
 def calculator(first_num: float, second_num: float, operation: str) -> dict:
-    """
-    Perform a basic arithmetic operation on two numbers.
-    Supported operations: add, sub, mul, div
-    """
-    try:
-        if operation == "add":
-            result = first_num + second_num
-        elif operation == "sub":
-            result = first_num - second_num
-        elif operation == "mul":
-            result = first_num * second_num
-        elif operation == "div":
-            if second_num == 0:
-                return {"error": "Division by zero is not allowed"}
-            result = first_num / second_num
-        else:
-            return {"error": f"Unsupported operation '{operation}'"}
-        
-        return {
-            "first_num": first_num,
-            "second_num": second_num,
-            "operation": operation,
-            "result": result
-        }
-    except Exception as e:
-        return {"error": str(e)}
+    """Perform basic arithmetic: add, sub, mul, div"""
+    if operation == "add":
+        return {"result": first_num + second_num}
+    if operation == "sub":
+        return {"result": first_num - second_num}
+    if operation == "mul":
+        return {"result": first_num * second_num}
+    if operation == "div":
+        if second_num == 0:
+            return {"error": "Division by zero"}
+        return {"result": first_num / second_num}
+    return {"error": "Invalid operation"}
 
 
 @tool
 def get_stock_price(symbol: str) -> dict:
-    """
-    Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA') 
-    using Alpha Vantage with API key in the URL.
-    """
+    """Fetch stock price using Alpha Vantage"""
     url = (
         "https://www.alphavantage.co/query"
         f"?function=GLOBAL_QUOTE&symbol={symbol}&apikey=C9PE94QUEW9VWGFM"
     )
-    r = requests.get(url)
-    return r.json()
+    return requests.get(url, timeout=10).json()
 
 
-tools = [search_tool, get_stock_price, calculator]
+tools = [calculator, get_stock_price]
 llm_with_tools = llm.bind_tools(tools)
 
-# -------------------
+# --------------------------------------------------
 # 3. State
-# -------------------
+# --------------------------------------------------
 class ChatState(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
+    messages: Annotated[List[BaseMessage], add_messages]
 
-# -------------------
-# 4. Nodes
-# -------------------
+# --------------------------------------------------
+# 4. Node
+# --------------------------------------------------
 def chat_node(state: ChatState):
-    """LLM node that may answer or request a tool call."""
-    messages = state["messages"]
-    response = llm_with_tools.invoke(messages)
+    response = llm_with_tools.invoke(state["messages"])
     return {"messages": [response]}
 
 tool_node = ToolNode(tools)
 
-# -------------------
-# 5. Checkpointer
-# -------------------
-conn = sqlite3.connect(database="chatbot.db", check_same_thread=False)
-checkpointer = SqliteSaver(conn=conn)
+# --------------------------------------------------
+# 5. Persistence
+# --------------------------------------------------
+conn = sqlite3.connect("chatbot.db", check_same_thread=False)
+checkpointer = SqliteSaver(conn)
 
-# -------------------
+# --------------------------------------------------
 # 6. Graph
-# -------------------
+# --------------------------------------------------
 graph = StateGraph(ChatState)
 graph.add_node("chat_node", chat_node)
 graph.add_node("tools", tool_node)
@@ -111,11 +94,12 @@ graph.add_edge("tools", "chat_node")
 
 chatbot = graph.compile(checkpointer=checkpointer)
 
-# -------------------
+# --------------------------------------------------
 # 7. Helper
-# -------------------
+# --------------------------------------------------
 def retrieve_all_threads():
-    all_threads = set()
-    for checkpoint in checkpointer.list(None):
-        all_threads.add(checkpoint.config["configurable"]["thread_id"])
-    return list(all_threads)
+    return list({
+        cp.config["configurable"]["thread_id"]
+        for cp in checkpointer.list(None)
+        if cp.config.get("configurable")
+    })
