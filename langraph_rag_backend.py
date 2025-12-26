@@ -31,17 +31,30 @@ import streamlit as st
 load_dotenv()
 
 # Get API key from Streamlit secrets or environment
-GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
+try:
+    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
+    if not GOOGLE_API_KEY:
+        st.error("⚠️ GOOGLE_API_KEY not found! Please add it to Streamlit secrets.")
+        st.stop()
+except Exception as e:
+    st.error(f"Error loading secrets: {e}")
+    GOOGLE_API_KEY = None
+
 ALPHA_VANTAGE_KEY = st.secrets.get("ALPHA_VANTAGE_KEY", os.getenv("ALPHA_VANTAGE_KEY", "C9PE94QUEW9VWGFM"))
 
 # --------------------------------------------------
 # LLM
 # --------------------------------------------------
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash-exp",
-    temperature=0,
-    google_api_key=GOOGLE_API_KEY,
-)
+try:
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.0-flash-exp",
+        temperature=0,
+        google_api_key=GOOGLE_API_KEY,
+    )
+except Exception as e:
+    st.error(f"Error initializing LLM: {e}")
+    st.error("Please check your GOOGLE_API_KEY in Streamlit secrets")
+    st.stop()
 
 # --------------------------------------------------
 # Local embeddings (NO API)
@@ -225,7 +238,10 @@ tool_node = ToolNode(tools)
 def get_checkpointer():
     db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    return SqliteSaver(conn), conn
+    saver = SqliteSaver(conn)
+    # Initialize the database schema
+    saver.setup()
+    return saver, conn
 
 checkpointer, conn = get_checkpointer()
 
@@ -252,10 +268,21 @@ chatbot = build_graph()
 def retrieve_all_threads():
     threads = set()
     try:
-        for cp in checkpointer.list(None):
-            cfg = cp.config.get("configurable")
-            if cfg and "thread_id" in cfg:
-                threads.add(cfg["thread_id"])
+        # Query the checkpoints table for all thread_ids
+        cursor = conn.cursor()
+        
+        # Check table structure
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
+        if cursor.fetchone():
+            cursor.execute("PRAGMA table_info(checkpoints)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            # LangGraph stores thread_id in checkpoint_ns column
+            if 'checkpoint_ns' in columns:
+                cursor.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints")
+                for row in cursor.fetchall():
+                    if row[0]:
+                        threads.add(row[0])
     except Exception as e:
         st.error(f"Error retrieving threads: {e}")
     return list(threads)
@@ -268,27 +295,40 @@ def delete_thread(thread_id: str) -> bool:
     try:
         cursor = conn.cursor()
         
-        # Delete from checkpoints table
-        cursor.execute(
-            "DELETE FROM checkpoints WHERE thread_id = ?",
-            (thread_id,)
-        )
+        # Get the actual table structure first
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cursor.fetchall()]
         
-        # Also try the JSON extract method as fallback
-        cursor.execute(
-            "DELETE FROM checkpoints "
-            "WHERE json_extract(config, '$.configurable.thread_id') = ?",
-            (thread_id,),
-        )
+        # Delete from checkpoints table using the correct column
+        if 'checkpoints' in tables:
+            # Check if checkpoint_ns column exists (LangGraph stores thread_id here)
+            cursor.execute("PRAGMA table_info(checkpoints)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'checkpoint_ns' in columns:
+                # For LangGraph, thread_id is stored in checkpoint_ns
+                cursor.execute(
+                    "DELETE FROM checkpoints WHERE checkpoint_ns = ?",
+                    (thread_id,)
+                )
+            
+            # Also try deleting by parent_checkpoint_ns
+            if 'parent_checkpoint_ns' in columns:
+                cursor.execute(
+                    "DELETE FROM checkpoints WHERE parent_checkpoint_ns LIKE ?",
+                    (f"%{thread_id}%",)
+                )
         
         # Delete from writes table if it exists
-        try:
-            cursor.execute(
-                "DELETE FROM writes WHERE thread_id = ?",
-                (thread_id,)
-            )
-        except sqlite3.OperationalError:
-            pass  # writes table might not exist
+        if 'writes' in tables:
+            cursor.execute("PRAGMA table_info(writes)")
+            write_columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'checkpoint_ns' in write_columns:
+                cursor.execute(
+                    "DELETE FROM writes WHERE checkpoint_ns = ?",
+                    (thread_id,)
+                )
         
         conn.commit()
         
@@ -300,4 +340,5 @@ def delete_thread(thread_id: str) -> bool:
         
     except Exception as e:
         st.error(f"Error deleting thread: {e}")
+        conn.rollback()
         return False

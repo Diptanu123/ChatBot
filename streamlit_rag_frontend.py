@@ -166,6 +166,19 @@ else:
 st.title("🤖 AI Chatbot")
 st.caption("Ask questions about your documents or anything else!")
 
+# Check if API key is configured
+if not st.secrets.get("GOOGLE_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
+    st.error("⚠️ **Google API Key not configured!**")
+    st.info("""
+    **To fix this:**
+    1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+    2. Create a free API key
+    3. In Streamlit Cloud: Go to App Settings → Secrets
+    4. Add: `GOOGLE_API_KEY = "your-key-here"`
+    5. Restart the app
+    """)
+    st.stop()
+
 # Display message history
 for msg in st.session_state["message_history"]:
     with st.chat_message(msg["role"]):
