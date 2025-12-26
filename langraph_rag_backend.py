@@ -129,17 +129,20 @@ def calculator(first_num: float, second_num: float, operation: str) -> dict:
     Returns:
         Dictionary with 'result' key or 'error' key
     """
-    if operation == "add":
-        return {"result": first_num + second_num}
-    if operation == "sub":
-        return {"result": first_num - second_num}
-    if operation == "mul":
-        return {"result": first_num * second_num}
-    if operation == "div":
-        if second_num == 0:
-            return {"error": "Division by zero"}
-        return {"result": first_num / second_num}
-    return {"error": "Invalid operation"}
+    try:
+        if operation == "add":
+            return {"result": first_num + second_num}
+        if operation == "sub":
+            return {"result": first_num - second_num}
+        if operation == "mul":
+            return {"result": first_num * second_num}
+        if operation == "div":
+            if second_num == 0:
+                return {"error": "Division by zero"}
+            return {"result": first_num / second_num}
+        return {"error": "Invalid operation"}
+    except Exception as e:
+        return {"error": str(e)}
 
 @tool
 def get_stock_price(symbol: str) -> dict:
@@ -172,13 +175,13 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
     Returns:
         Dictionary with answer and source filename
     """
-    thread_id = config.get("configurable", {}).get("thread_id")
-
-    retriever = _get_retriever(thread_id)
-    if retriever is None:
-        return {"error": "No PDF indexed for this chat. Please upload a PDF first."}
-
     try:
+        thread_id = config.get("configurable", {}).get("thread_id")
+        
+        retriever = _get_retriever(thread_id)
+        if retriever is None:
+            return {"error": "No PDF indexed for this chat. Please upload a PDF first."}
+
         docs = retriever.invoke(query)
         return {
             "answer": "\n\n".join(d.page_content for d in docs),
@@ -189,7 +192,13 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
 
 
 tools = [calculator, get_stock_price, rag_tool]
-llm_with_tools = llm.bind_tools(tools)
+
+# Bind tools to LLM
+try:
+    llm_with_tools = llm.bind_tools(tools)
+except Exception as e:
+    st.error(f"Error binding tools to LLM: {e}")
+    llm_with_tools = llm
 
 # --------------------------------------------------
 # State
@@ -200,34 +209,41 @@ class ChatState(TypedDict):
 # --------------------------------------------------
 # Node
 # --------------------------------------------------
-def chat_node(state: ChatState, config=None):
-    thread_id = None
-    if config and "configurable" in config:
-        thread_id = config["configurable"].get("thread_id")
+def chat_node(state: ChatState, config: RunnableConfig = None):
+    """Main chat node that processes messages."""
+    try:
+        thread_id = None
+        if config and "configurable" in config:
+            thread_id = config["configurable"].get("thread_id")
 
-    has_pdf = thread_id and _get_retriever(thread_id) is not None
-    pdf_info = ""
-    if has_pdf:
-        meta = _THREAD_METADATA.get(str(thread_id), {})
-        pdf_info = f"\nA PDF document '{meta.get('filename', 'unknown')}' has been uploaded. Use rag_tool to answer questions about it."
+        has_pdf = thread_id and _get_retriever(thread_id) is not None
+        pdf_info = ""
+        if has_pdf:
+            meta = _THREAD_METADATA.get(str(thread_id), {})
+            pdf_info = f"\nA PDF document '{meta.get('filename', 'unknown')}' has been uploaded. Use rag_tool to answer questions about it."
 
-    system = SystemMessage(
-        content=(
-            "You are a helpful AI assistant with access to tools.\n"
-            f"Current thread_id: {thread_id}\n"
-            f"{pdf_info}\n"
-            "When users ask about documents, uploaded files, or PDFs, use the rag_tool.\n"
-            "For calculations, use the calculator tool.\n"
-            "For stock prices, use the get_stock_price tool.\n"
-            "Always be helpful and friendly."
+        system = SystemMessage(
+            content=(
+                "You are a helpful AI assistant with access to tools.\n"
+                f"Current thread_id: {thread_id}\n"
+                f"{pdf_info}\n"
+                "When users ask about documents, uploaded files, or PDFs, use the rag_tool.\n"
+                "For calculations, use the calculator tool.\n"
+                "For stock prices, use the get_stock_price tool.\n"
+                "Always be helpful and friendly. Provide clear, concise answers."
+            )
         )
-    )
 
-    response = llm_with_tools.invoke(
-        [system, *state["messages"]],
-        config=config,
-    )
-    return {"messages": [response]}
+        response = llm_with_tools.invoke(
+            [system, *state["messages"]],
+            config=config,
+        )
+        return {"messages": [response]}
+    except Exception as e:
+        # Return error message if something fails
+        from langchain_core.messages import AIMessage
+        error_msg = f"I apologize, but I encountered an error: {str(e)}"
+        return {"messages": [AIMessage(content=error_msg)]}
 
 tool_node = ToolNode(tools)
 
@@ -236,12 +252,17 @@ tool_node = ToolNode(tools)
 # --------------------------------------------------
 @st.cache_resource
 def get_checkpointer():
-    db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    saver = SqliteSaver(conn)
-    # Initialize the database schema
-    saver.setup()
-    return saver, conn
+    """Initialize SQLite checkpointer with proper setup."""
+    try:
+        db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        saver = SqliteSaver(conn)
+        # Initialize the database schema
+        saver.setup()
+        return saver, conn
+    except Exception as e:
+        st.error(f"Error initializing checkpointer: {e}")
+        raise
 
 checkpointer, conn = get_checkpointer()
 
@@ -250,15 +271,20 @@ checkpointer, conn = get_checkpointer()
 # --------------------------------------------------
 @st.cache_resource
 def build_graph():
-    graph = StateGraph(ChatState)
-    graph.add_node("chat_node", chat_node)
-    graph.add_node("tools", tool_node)
+    """Build the LangGraph state graph."""
+    try:
+        graph = StateGraph(ChatState)
+        graph.add_node("chat_node", chat_node)
+        graph.add_node("tools", tool_node)
 
-    graph.add_edge(START, "chat_node")
-    graph.add_conditional_edges("chat_node", tools_condition)
-    graph.add_edge("tools", "chat_node")
+        graph.add_edge(START, "chat_node")
+        graph.add_conditional_edges("chat_node", tools_condition)
+        graph.add_edge("tools", "chat_node")
 
-    return graph.compile(checkpointer=checkpointer)
+        return graph.compile(checkpointer=checkpointer)
+    except Exception as e:
+        st.error(f"Error building graph: {e}")
+        raise
 
 chatbot = build_graph()
 
@@ -266,20 +292,18 @@ chatbot = build_graph()
 # Helpers
 # --------------------------------------------------
 def retrieve_all_threads():
+    """Retrieve all thread IDs from the database."""
     threads = set()
     try:
-        # Query the checkpoints table for all thread_ids
         cursor = conn.cursor()
         
-        # Check table structure
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
         if cursor.fetchone():
             cursor.execute("PRAGMA table_info(checkpoints)")
             columns = [col[1] for col in cursor.fetchall()]
             
-            # LangGraph stores thread_id in checkpoint_ns column
             if 'checkpoint_ns' in columns:
-                cursor.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints")
+                cursor.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints WHERE checkpoint_ns IS NOT NULL")
                 for row in cursor.fetchall():
                     if row[0]:
                         threads.add(row[0])
@@ -288,6 +312,7 @@ def retrieve_all_threads():
     return list(threads)
 
 def thread_document_metadata(thread_id: str):
+    """Get document metadata for a thread."""
     return _THREAD_METADATA.get(str(thread_id), {})
 
 def delete_thread(thread_id: str) -> bool:
@@ -295,31 +320,25 @@ def delete_thread(thread_id: str) -> bool:
     try:
         cursor = conn.cursor()
         
-        # Get the actual table structure first
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [row[0] for row in cursor.fetchall()]
         
-        # Delete from checkpoints table using the correct column
         if 'checkpoints' in tables:
-            # Check if checkpoint_ns column exists (LangGraph stores thread_id here)
             cursor.execute("PRAGMA table_info(checkpoints)")
             columns = [col[1] for col in cursor.fetchall()]
             
             if 'checkpoint_ns' in columns:
-                # For LangGraph, thread_id is stored in checkpoint_ns
                 cursor.execute(
                     "DELETE FROM checkpoints WHERE checkpoint_ns = ?",
                     (thread_id,)
                 )
             
-            # Also try deleting by parent_checkpoint_ns
             if 'parent_checkpoint_ns' in columns:
                 cursor.execute(
                     "DELETE FROM checkpoints WHERE parent_checkpoint_ns LIKE ?",
                     (f"%{thread_id}%",)
                 )
         
-        # Delete from writes table if it exists
         if 'writes' in tables:
             cursor.execute("PRAGMA table_info(writes)")
             write_columns = [col[1] for col in cursor.fetchall()]

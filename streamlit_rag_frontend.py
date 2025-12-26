@@ -30,9 +30,8 @@ def extract_text(content):
         return content
     if isinstance(content, list):
         return "".join(
-            block.get("text", "")
+            block.get("text", "") if isinstance(block, dict) else str(block)
             for block in content
-            if isinstance(block, dict)
         )
     return ""
 
@@ -217,11 +216,12 @@ user_input = st.chat_input(
 if user_input and not st.session_state.get("processing", False):
     st.session_state["processing"] = True
     
-    # Add user message
+    # Add user message immediately
     st.session_state["message_history"].append(
         {"role": "user", "content": user_input}
     )
 
+    # Display user message
     with st.chat_message("user"):
         st.markdown(user_input)
 
@@ -234,49 +234,51 @@ if user_input and not st.session_state.get("processing", False):
 
     # Generate AI response
     with st.chat_message("assistant"):
-        with st.spinner("🤔 Thinking..."):
-            try:
-                full_response = ""
-                placeholder = st.empty()
-                
-                for message_chunk, _ in chatbot.stream(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config=CONFIG,
-                    stream_mode="messages",
-                ):
-                    # Skip tool messages
-                    if isinstance(message_chunk, ToolMessage):
-                        continue
+        response_placeholder = st.empty()
+        
+        try:
+            # Use invoke instead of stream for more reliability
+            result = chatbot.invoke(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=CONFIG
+            )
+            
+            # Extract the final AI message
+            ai_response = ""
+            if result and "messages" in result:
+                for msg in reversed(result["messages"]):
+                    if isinstance(msg, AIMessage):
+                        ai_response = extract_text(msg.content)
+                        if ai_response:
+                            break
+            
+            if not ai_response:
+                ai_response = "I apologize, but I couldn't generate a response. Please try again."
+            
+            response_placeholder.markdown(ai_response)
+            
+            # Add to history
+            st.session_state["message_history"].append(
+                {"role": "assistant", "content": ai_response}
+            )
 
-                    # Process AI messages
-                    if isinstance(message_chunk, AIMessage):
-                        text = extract_text(message_chunk.content)
-                        if text:
-                            full_response += text
-                            placeholder.markdown(full_response + "▌")
-                
-                placeholder.markdown(full_response)
-
-                # Add to history
-                st.session_state["message_history"].append(
-                    {"role": "assistant", "content": full_response}
+            # Show document info if available
+            doc_meta = thread_document_metadata(thread_key)
+            if doc_meta:
+                st.caption(
+                    f"📄 `{doc_meta['filename']}` • "
+                    f"{doc_meta['chunks']} chunks • "
+                    f"{doc_meta['documents']} pages"
                 )
 
-                # Show document info if available
-                doc_meta = thread_document_metadata(thread_key)
-                if doc_meta:
-                    st.caption(
-                        f"📄 `{doc_meta['filename']}` • "
-                        f"{doc_meta['chunks']} chunks • "
-                        f"{doc_meta['documents']} pages"
-                    )
-
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-                st.error("Please check if your Google API key is set correctly in Streamlit secrets.")
-                # Remove the failed user message
-                if st.session_state["message_history"][-1]["role"] == "user":
-                    st.session_state["message_history"].pop()
+        except Exception as e:
+            error_msg = f"❌ Error: {str(e)}"
+            st.error(error_msg)
+            st.error("Please check your API key and try again.")
+            
+            # Remove the user message on error
+            if st.session_state["message_history"] and st.session_state["message_history"][-1]["role"] == "user":
+                st.session_state["message_history"].pop()
     
     st.session_state["processing"] = False
     st.rerun()
