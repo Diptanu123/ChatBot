@@ -117,7 +117,16 @@ def get_stock_price(symbol: str) -> dict:
     return requests.get(url, timeout=10).json()
 
 @tool
-def rag_tool(query: str, thread_id: str) -> dict:
+def rag_tool(query: str) -> dict:
+    """
+    Retrieve information from the uploaded PDF for the current conversation.
+    """
+    # thread_id is injected via LangGraph config
+    from langchain_core.runnables import RunnableConfig
+
+    config = RunnableConfig.get_current()
+    thread_id = config.get("configurable", {}).get("thread_id")
+
     retriever = _get_retriever(thread_id)
     if retriever is None:
         return {"error": "No PDF indexed for this chat"}
@@ -127,6 +136,7 @@ def rag_tool(query: str, thread_id: str) -> dict:
         "answer": "\n\n".join(d.page_content for d in docs),
         "source": _THREAD_METADATA.get(str(thread_id), {}).get("filename"),
     }
+
 
 tools = [calculator, get_stock_price, rag_tool]
 llm_with_tools = llm.bind_tools(tools)
