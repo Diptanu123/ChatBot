@@ -11,16 +11,16 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import BaseMessage, SystemMessage, AIMessage
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import START, StateGraph
+from langgraph.graph import START, StateGraph, END
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
 import requests
 import streamlit as st
@@ -48,7 +48,7 @@ ALPHA_VANTAGE_KEY = st.secrets.get("ALPHA_VANTAGE_KEY", os.getenv("ALPHA_VANTAGE
 try:
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.0-flash-exp",
-        temperature=0.7,  # Increased for more natural responses
+        temperature=0.7,
         google_api_key=GOOGLE_API_KEY,
     )
     print("✅ LLM initialized successfully")
@@ -201,7 +201,7 @@ class ChatState(TypedDict):
 # Node Functions
 # --------------------------------------------------
 def chat_node(state: ChatState, config: RunnableConfig = None):
-    """Main chat node that processes messages and decides whether to use tools."""
+    """Main chat node that processes messages."""
     print(f"🔵 chat_node called with {len(state['messages'])} messages")
     
     thread_id = None
@@ -238,27 +238,48 @@ def chat_node(state: ChatState, config: RunnableConfig = None):
             [system, *state["messages"]],
             config=config,
         )
-        print(f"✅ LLM responded with: {response.content[:100]}...")
+        print(f"✅ LLM responded")
+        print(f"📝 Response type: {type(response)}")
+        print(f"📝 Response content: {str(response.content)[:200]}")
+        print(f"📝 Has tool calls: {hasattr(response, 'tool_calls') and bool(response.tool_calls)}")
         
         return {"messages": [response]}
+        
     except Exception as e:
         print(f"❌ Error in chat_node: {e}")
+        import traceback
+        print(traceback.format_exc())
         # Return error message to user
-        from langchain_core.messages import AIMessage
-        error_msg = AIMessage(content=f"I encountered an error: {str(e)}. Please try again.")
+        error_msg = AIMessage(content=f"I apologize, but I encountered an error: {str(e)}. Please try again.")
         return {"messages": [error_msg]}
 
-tool_node = ToolNode(tools)
+
+def should_continue(state: ChatState):
+    """Determine if we should continue to tools or end."""
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    print(f"🔍 should_continue check...")
+    print(f"📝 Last message type: {type(last_message)}")
+    
+    # If there are tool calls, continue to tools
+    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+        print(f"🔧 Tool calls found: {len(last_message.tool_calls)}")
+        return "tools"
+    
+    # Otherwise, end
+    print("✅ No tool calls, ending")
+    return "end"
+
 
 # --------------------------------------------------
-# Persistence - Initialize database properly
+# Persistence
 # --------------------------------------------------
 @st.cache_resource
 def get_checkpointer():
     db_path = os.path.join(tempfile.gettempdir(), "chatbot.db")
     conn = sqlite3.connect(db_path, check_same_thread=False)
     saver = SqliteSaver(conn)
-    # Initialize the database schema
     saver.setup()
     print(f"✅ Database initialized at: {db_path}")
     return saver, conn
@@ -271,12 +292,31 @@ checkpointer, conn = get_checkpointer()
 @st.cache_resource
 def build_graph():
     print("🔨 Building graph...")
+    
+    # Create tool node
+    tool_node = ToolNode(tools)
+    
+    # Create graph
     graph = StateGraph(ChatState)
+    
+    # Add nodes
     graph.add_node("chat_node", chat_node)
     graph.add_node("tools", tool_node)
 
+    # Add edges
     graph.add_edge(START, "chat_node")
-    graph.add_conditional_edges("chat_node", tools_condition)
+    
+    # Add conditional edges with proper routing
+    graph.add_conditional_edges(
+        "chat_node",
+        should_continue,
+        {
+            "tools": "tools",
+            "end": END
+        }
+    )
+    
+    # Tools always go back to chat
     graph.add_edge("tools", "chat_node")
 
     compiled = graph.compile(checkpointer=checkpointer)
@@ -291,16 +331,12 @@ chatbot = build_graph()
 def retrieve_all_threads():
     threads = set()
     try:
-        # Query the checkpoints table for all thread_ids
         cursor = conn.cursor()
-        
-        # Check table structure
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
         if cursor.fetchone():
             cursor.execute("PRAGMA table_info(checkpoints)")
             columns = [col[1] for col in cursor.fetchall()]
             
-            # LangGraph stores thread_id in checkpoint_ns column
             if 'checkpoint_ns' in columns:
                 cursor.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints")
                 for row in cursor.fetchall():
@@ -317,32 +353,25 @@ def delete_thread(thread_id: str) -> bool:
     """Delete a thread from the database and memory."""
     try:
         cursor = conn.cursor()
-        
-        # Get the actual table structure first
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [row[0] for row in cursor.fetchall()]
         
-        # Delete from checkpoints table using the correct column
         if 'checkpoints' in tables:
-            # Check if checkpoint_ns column exists (LangGraph stores thread_id here)
             cursor.execute("PRAGMA table_info(checkpoints)")
             columns = [col[1] for col in cursor.fetchall()]
             
             if 'checkpoint_ns' in columns:
-                # For LangGraph, thread_id is stored in checkpoint_ns
                 cursor.execute(
                     "DELETE FROM checkpoints WHERE checkpoint_ns = ?",
                     (thread_id,)
                 )
             
-            # Also try deleting by parent_checkpoint_ns
             if 'parent_checkpoint_ns' in columns:
                 cursor.execute(
                     "DELETE FROM checkpoints WHERE parent_checkpoint_ns LIKE ?",
                     (f"%{thread_id}%",)
                 )
         
-        # Delete from writes table if it exists
         if 'writes' in tables:
             cursor.execute("PRAGMA table_info(writes)")
             write_columns = [col[1] for col in cursor.fetchall()]
@@ -355,7 +384,6 @@ def delete_thread(thread_id: str) -> bool:
         
         conn.commit()
         
-        # Clean up memory
         _THREAD_RETRIEVERS.pop(str(thread_id), None)
         _THREAD_METADATA.pop(str(thread_id), None)
         
