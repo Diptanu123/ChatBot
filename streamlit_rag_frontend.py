@@ -239,23 +239,34 @@ if user_input and not st.session_state.get("processing", False):
                 full_response = ""
                 placeholder = st.empty()
                 
-                for message_chunk, _ in chatbot.stream(
+                # Use stream_mode="values" for reliable streaming
+                for event in chatbot.stream(
                     {"messages": [HumanMessage(content=user_input)]},
                     config=CONFIG,
-                    stream_mode="messages",
+                    stream_mode="values",
                 ):
-                    # Skip tool messages
-                    if isinstance(message_chunk, ToolMessage):
-                        continue
-
-                    # Process AI messages
-                    if isinstance(message_chunk, AIMessage):
-                        text = extract_text(message_chunk.content)
-                        if text:
-                            full_response += text
-                            placeholder.markdown(full_response + "▌")
+                    # Get the messages from the state
+                    messages = event.get("messages", [])
+                    if messages:
+                        last_msg = messages[-1]
+                        
+                        # Only process AI messages
+                        if isinstance(last_msg, AIMessage):
+                            # Extract text from the message
+                            text = extract_text(last_msg.content)
+                            
+                            # Update only if we have new content
+                            if text and text != full_response:
+                                full_response = text
+                                placeholder.markdown(full_response + "▌")
                 
-                placeholder.markdown(full_response)
+                # Remove cursor and show final response
+                if full_response:
+                    placeholder.markdown(full_response)
+                else:
+                    # Fallback if no response was generated
+                    full_response = "I apologize, but I couldn't generate a response. Please try again."
+                    placeholder.markdown(full_response)
 
                 # Add to history
                 st.session_state["message_history"].append(
