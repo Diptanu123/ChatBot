@@ -1,6 +1,7 @@
 import uuid
 import streamlit as st
 import os
+import time
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from langraph_rag_backend import (
@@ -84,9 +85,6 @@ if "ingested_docs" not in st.session_state:
 if "processing" not in st.session_state:
     st.session_state["processing"] = False
 
-if "debug_mode" not in st.session_state:
-    st.session_state["debug_mode"] = False
-
 add_thread(st.session_state["thread_id"])
 
 thread_key = str(st.session_state["thread_id"])
@@ -96,9 +94,6 @@ thread_docs = st.session_state["ingested_docs"].setdefault(thread_key, {})
 
 st.sidebar.title("📄 PDF Chatbot")
 st.sidebar.markdown(f"**Thread ID:** `{thread_key[:8]}...`")
-
-# Debug toggle
-st.session_state["debug_mode"] = st.sidebar.checkbox("🐛 Debug Mode", value=False)
 
 if st.sidebar.button("➕ New Chat", use_container_width=True):
     reset_chat()
@@ -248,15 +243,16 @@ if user_input and not st.session_state.get("processing", False):
         try:
             full_response = ""
             placeholder = st.empty()
-            debug_container = st.expander("🐛 Debug Info") if st.session_state["debug_mode"] else None
+            thinking_placeholder = st.empty()
             
-            if st.session_state["debug_mode"]:
-                debug_container.write(f"**Thread ID:** {thread_key}")
-                debug_container.write(f"**User Input:** {user_input}")
-                debug_container.write("**Starting stream...**")
+            # Show animated thinking indicator
+            thinking_dots = ["🤔 Thinking", "🤔 Thinking.", "🤔 Thinking..", "🤔 Thinking..."]
+            dot_index = 0
+            thinking_placeholder.markdown(thinking_dots[0])
             
             event_count = 0
-            last_event_messages = []
+            has_response = False
+            last_update = time.time()
             
             # Use stream_mode="values" for reliable streaming
             stream = chatbot.stream(
@@ -265,59 +261,44 @@ if user_input and not st.session_state.get("processing", False):
                 stream_mode="values",
             )
             
-            if st.session_state["debug_mode"]:
-                debug_container.write("**Stream object created**")
-            
             for event in stream:
                 event_count += 1
                 
-                if st.session_state["debug_mode"]:
-                    debug_container.write(f"**Event {event_count}:** {list(event.keys())}")
+                # Animate thinking dots
+                if not has_response and time.time() - last_update > 0.3:
+                    dot_index = (dot_index + 1) % len(thinking_dots)
+                    thinking_placeholder.markdown(thinking_dots[dot_index])
+                    last_update = time.time()
                 
                 # Get the messages from the state
                 messages = event.get("messages", [])
                 
-                if st.session_state["debug_mode"]:
-                    debug_container.write(f"**Messages count:** {len(messages)}")
-                    if messages:
-                        for i, msg in enumerate(messages):
-                            debug_container.write(f"  - Message {i}: {type(msg).__name__}")
-                
-                last_event_messages = messages
-                
                 if messages:
                     last_msg = messages[-1]
-                    
-                    if st.session_state["debug_mode"]:
-                        debug_container.write(f"**Last message type:** {type(last_msg).__name__}")
                     
                     # Only process AI messages
                     if isinstance(last_msg, AIMessage):
                         # Extract text from the message
                         text = extract_text(last_msg.content)
                         
-                        if st.session_state["debug_mode"]:
-                            debug_container.write(f"**Extracted text:** {text[:100]}...")
-                        
                         # Update only if we have new content
                         if text and text != full_response:
+                            # Clear thinking indicator once we get response
+                            if not has_response:
+                                thinking_placeholder.empty()
+                                has_response = True
+                            
                             full_response = text
                             placeholder.markdown(full_response + "▌")
             
-            if st.session_state["debug_mode"]:
-                debug_container.write(f"**Total events:** {event_count}")
-                debug_container.write(f"**Total messages in last event:** {len(last_event_messages)}")
-                debug_container.write(f"**Final response length:** {len(full_response)}")
-            
             # Remove cursor and show final response
+            thinking_placeholder.empty()
             if full_response:
                 placeholder.markdown(full_response)
             else:
                 # Fallback if no response was generated
                 full_response = "Hello! How can I help you today?"
                 placeholder.markdown(full_response)
-                if st.session_state["debug_mode"]:
-                    debug_container.error("⚠️ No response generated, using fallback")
 
             # Add to history
             st.session_state["message_history"].append(
