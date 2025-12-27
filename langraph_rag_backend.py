@@ -11,11 +11,12 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
-from langchain_core.messages import BaseMessage, SystemMessage, AIMessage
+from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+# Use Groq instead of Google Gemini
+from langchain_groq import ChatGroq
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import START, StateGraph, END
@@ -30,31 +31,32 @@ import streamlit as st
 # --------------------------------------------------
 load_dotenv()
 
-# Get API key from Streamlit secrets or environment
+# Get Groq API key from Streamlit secrets or environment
 try:
-    GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
-    if not GOOGLE_API_KEY:
-        st.error("⚠️ GOOGLE_API_KEY not found! Please add it to Streamlit secrets.")
+    GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
+    if not GROQ_API_KEY:
+        st.error("⚠️ GROQ_API_KEY not found! Get one free at https://console.groq.com")
         st.stop()
 except Exception as e:
     st.error(f"Error loading secrets: {e}")
-    GOOGLE_API_KEY = None
+    GROQ_API_KEY = None
 
 ALPHA_VANTAGE_KEY = st.secrets.get("ALPHA_VANTAGE_KEY", os.getenv("ALPHA_VANTAGE_KEY", "C9PE94QUEW9VWGFM"))
 
 # --------------------------------------------------
-# LLM
+# LLM with Groq (FREE & FAST!)
 # --------------------------------------------------
 try:
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",  # Stable model with higher quota
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",  # Free, powerful model
         temperature=0.7,
-        google_api_key=GOOGLE_API_KEY,
+        groq_api_key=GROQ_API_KEY,
+        max_tokens=2048,
     )
-    print("✅ LLM initialized successfully")
+    print("✅ Groq LLM initialized successfully")
 except Exception as e:
     st.error(f"Error initializing LLM: {e}")
-    st.error("Please check your GOOGLE_API_KEY in Streamlit secrets")
+    st.error("Please check your GROQ_API_KEY in Streamlit secrets")
     st.stop()
 
 # --------------------------------------------------
@@ -224,7 +226,7 @@ def chat_node(state: ChatState, config: RunnableConfig = None):
             "When users ask about documents, uploaded files, or PDFs, use the rag_tool.\n"
             "For calculations, use the calculator tool.\n"
             "For stock prices, use the get_stock_price tool.\n"
-            "Always be helpful and friendly. Answer casual greetings naturally without using tools."
+            "Always be helpful and friendly."
         )
     )
 
@@ -233,15 +235,12 @@ def chat_node(state: ChatState, config: RunnableConfig = None):
         llm_with_tools = llm.bind_tools(tools)
         
         # Invoke LLM
-        print("🤖 Invoking LLM...")
+        print("🤖 Invoking Groq LLM...")
         response = llm_with_tools.invoke(
             [system, *state["messages"]],
             config=config,
         )
-        print(f"✅ LLM responded")
-        print(f"📝 Response type: {type(response)}")
-        print(f"📝 Response content: {str(response.content)[:200]}")
-        print(f"📝 Has tool calls: {hasattr(response, 'tool_calls') and bool(response.tool_calls)}")
+        print(f"✅ LLM responded successfully")
         
         return {"messages": [response]}
         
@@ -249,7 +248,6 @@ def chat_node(state: ChatState, config: RunnableConfig = None):
         print(f"❌ Error in chat_node: {e}")
         import traceback
         print(traceback.format_exc())
-        # Return error message to user
         error_msg = AIMessage(content=f"I apologize, but I encountered an error: {str(e)}. Please try again.")
         return {"messages": [error_msg]}
 
@@ -258,9 +256,6 @@ def should_continue(state: ChatState):
     """Determine if we should continue to tools or end."""
     messages = state["messages"]
     last_message = messages[-1]
-    
-    print(f"🔍 should_continue check...")
-    print(f"📝 Last message type: {type(last_message)}")
     
     # If there are tool calls, continue to tools
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
@@ -325,22 +320,7 @@ def build_graph():
 
 # Build graph on module load
 chatbot = build_graph()
-print("🎯 Chatbot ready")
-
-# Test the graph immediately on import
-try:
-    print("🧪 Testing graph with simple message...")
-    test_config = {"configurable": {"thread_id": "test-thread"}}
-    test_result = list(chatbot.stream(
-        {"messages": [HumanMessage(content="test")]},
-        config=test_config,
-        stream_mode="values"
-    ))
-    print(f"✅ Graph test passed! Generated {len(test_result)} events")
-except Exception as e:
-    print(f"❌ Graph test failed: {e}")
-    import traceback
-    print(traceback.format_exc())
+print("🎯 Groq Chatbot ready")
 
 # --------------------------------------------------
 # Helpers

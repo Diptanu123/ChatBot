@@ -198,15 +198,17 @@ st.title("🤖 AI Chatbot")
 st.caption("Ask questions about your documents or anything else!")
 
 # Check if API key is configured
-if not st.secrets.get("GOOGLE_API_KEY") and not os.getenv("GOOGLE_API_KEY"):
-    st.error("⚠️ **Google API Key not configured!**")
+if not st.secrets.get("GROQ_API_KEY") and not os.getenv("GROQ_API_KEY"):
+    st.error("⚠️ **Groq API Key not configured!**")
     st.info("""
     **To fix this:**
-    1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
-    2. Create a free API key
+    1. Go to [Groq Console](https://console.groq.com)
+    2. Create a FREE API key (no credit card needed!)
     3. In Streamlit Cloud: Go to App Settings → Secrets
-    4. Add: `GOOGLE_API_KEY = "your-key-here"`
+    4. Add: `GROQ_API_KEY = "your-key-here"`
     5. Restart the app
+    
+    **Why Groq?** Super fast, generous free tier (14,400 requests/day), no credit card required!
     """)
     st.stop()
 
