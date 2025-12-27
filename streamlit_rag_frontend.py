@@ -254,13 +254,19 @@ if user_input and not st.session_state.get("processing", False):
                 debug_container.write("**Starting stream...**")
             
             event_count = 0
+            last_event_messages = []
             
             # Use stream_mode="values" for reliable streaming
-            for event in chatbot.stream(
+            stream = chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=CONFIG,
                 stream_mode="values",
-            ):
+            )
+            
+            if st.session_state["debug_mode"]:
+                debug_container.write("**Stream object created**")
+            
+            for event in stream:
                 event_count += 1
                 
                 if st.session_state["debug_mode"]:
@@ -271,6 +277,11 @@ if user_input and not st.session_state.get("processing", False):
                 
                 if st.session_state["debug_mode"]:
                     debug_container.write(f"**Messages count:** {len(messages)}")
+                    if messages:
+                        for i, msg in enumerate(messages):
+                            debug_container.write(f"  - Message {i}: {type(msg).__name__}")
+                
+                last_event_messages = messages
                 
                 if messages:
                     last_msg = messages[-1]
@@ -293,6 +304,7 @@ if user_input and not st.session_state.get("processing", False):
             
             if st.session_state["debug_mode"]:
                 debug_container.write(f"**Total events:** {event_count}")
+                debug_container.write(f"**Total messages in last event:** {len(last_event_messages)}")
                 debug_container.write(f"**Final response length:** {len(full_response)}")
             
             # Remove cursor and show final response

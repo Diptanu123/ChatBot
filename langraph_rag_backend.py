@@ -289,8 +289,8 @@ checkpointer, conn = get_checkpointer()
 # --------------------------------------------------
 # Graph
 # --------------------------------------------------
-@st.cache_resource
 def build_graph():
+    """Build the graph without caching to avoid stale state."""
     print("🔨 Building graph...")
     
     # Create tool node
@@ -323,7 +323,24 @@ def build_graph():
     print("✅ Graph compiled successfully")
     return compiled
 
+# Build graph on module load
 chatbot = build_graph()
+print("🎯 Chatbot ready")
+
+# Test the graph immediately on import
+try:
+    print("🧪 Testing graph with simple message...")
+    test_config = {"configurable": {"thread_id": "test-thread"}}
+    test_result = list(chatbot.stream(
+        {"messages": [HumanMessage(content="test")]},
+        config=test_config,
+        stream_mode="values"
+    ))
+    print(f"✅ Graph test passed! Generated {len(test_result)} events")
+except Exception as e:
+    print(f"❌ Graph test failed: {e}")
+    import traceback
+    print(traceback.format_exc())
 
 # --------------------------------------------------
 # Helpers
