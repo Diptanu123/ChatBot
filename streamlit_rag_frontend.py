@@ -29,12 +29,15 @@ def extract_text(content):
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict)
-        )
-    return ""
+        text_parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if "text" in block:
+                    text_parts.append(block["text"])
+                elif "type" in block and block["type"] == "text" and "text" in block:
+                    text_parts.append(block["text"])
+        return "".join(text_parts)
+    return str(content)
 
 
 def add_thread(thread_id):
@@ -81,6 +84,9 @@ if "ingested_docs" not in st.session_state:
 if "processing" not in st.session_state:
     st.session_state["processing"] = False
 
+if "debug_mode" not in st.session_state:
+    st.session_state["debug_mode"] = False
+
 add_thread(st.session_state["thread_id"])
 
 thread_key = str(st.session_state["thread_id"])
@@ -90,6 +96,9 @@ thread_docs = st.session_state["ingested_docs"].setdefault(thread_key, {})
 
 st.sidebar.title("📄 PDF Chatbot")
 st.sidebar.markdown(f"**Thread ID:** `{thread_key[:8]}...`")
+
+# Debug toggle
+st.session_state["debug_mode"] = st.sidebar.checkbox("🐛 Debug Mode", value=False)
 
 if st.sidebar.button("➕ New Chat", use_container_width=True):
     reset_chat()
@@ -234,60 +243,92 @@ if user_input and not st.session_state.get("processing", False):
 
     # Generate AI response
     with st.chat_message("assistant"):
-        with st.spinner("🤔 Thinking..."):
-            try:
-                full_response = ""
-                placeholder = st.empty()
+        try:
+            full_response = ""
+            placeholder = st.empty()
+            debug_container = st.expander("🐛 Debug Info") if st.session_state["debug_mode"] else None
+            
+            if st.session_state["debug_mode"]:
+                debug_container.write(f"**Thread ID:** {thread_key}")
+                debug_container.write(f"**User Input:** {user_input}")
+                debug_container.write("**Starting stream...**")
+            
+            event_count = 0
+            
+            # Use stream_mode="values" for reliable streaming
+            for event in chatbot.stream(
+                {"messages": [HumanMessage(content=user_input)]},
+                config=CONFIG,
+                stream_mode="values",
+            ):
+                event_count += 1
                 
-                # Use stream_mode="values" for reliable streaming
-                for event in chatbot.stream(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config=CONFIG,
-                    stream_mode="values",
-                ):
-                    # Get the messages from the state
-                    messages = event.get("messages", [])
-                    if messages:
-                        last_msg = messages[-1]
+                if st.session_state["debug_mode"]:
+                    debug_container.write(f"**Event {event_count}:** {list(event.keys())}")
+                
+                # Get the messages from the state
+                messages = event.get("messages", [])
+                
+                if st.session_state["debug_mode"]:
+                    debug_container.write(f"**Messages count:** {len(messages)}")
+                
+                if messages:
+                    last_msg = messages[-1]
+                    
+                    if st.session_state["debug_mode"]:
+                        debug_container.write(f"**Last message type:** {type(last_msg).__name__}")
+                    
+                    # Only process AI messages
+                    if isinstance(last_msg, AIMessage):
+                        # Extract text from the message
+                        text = extract_text(last_msg.content)
                         
-                        # Only process AI messages
-                        if isinstance(last_msg, AIMessage):
-                            # Extract text from the message
-                            text = extract_text(last_msg.content)
-                            
-                            # Update only if we have new content
-                            if text and text != full_response:
-                                full_response = text
-                                placeholder.markdown(full_response + "▌")
-                
-                # Remove cursor and show final response
-                if full_response:
-                    placeholder.markdown(full_response)
-                else:
-                    # Fallback if no response was generated
-                    full_response = "I apologize, but I couldn't generate a response. Please try again."
-                    placeholder.markdown(full_response)
+                        if st.session_state["debug_mode"]:
+                            debug_container.write(f"**Extracted text:** {text[:100]}...")
+                        
+                        # Update only if we have new content
+                        if text and text != full_response:
+                            full_response = text
+                            placeholder.markdown(full_response + "▌")
+            
+            if st.session_state["debug_mode"]:
+                debug_container.write(f"**Total events:** {event_count}")
+                debug_container.write(f"**Final response length:** {len(full_response)}")
+            
+            # Remove cursor and show final response
+            if full_response:
+                placeholder.markdown(full_response)
+            else:
+                # Fallback if no response was generated
+                full_response = "Hello! How can I help you today?"
+                placeholder.markdown(full_response)
+                if st.session_state["debug_mode"]:
+                    debug_container.error("⚠️ No response generated, using fallback")
 
-                # Add to history
-                st.session_state["message_history"].append(
-                    {"role": "assistant", "content": full_response}
+            # Add to history
+            st.session_state["message_history"].append(
+                {"role": "assistant", "content": full_response}
+            )
+
+            # Show document info if available
+            doc_meta = thread_document_metadata(thread_key)
+            if doc_meta:
+                st.caption(
+                    f"📄 `{doc_meta['filename']}` • "
+                    f"{doc_meta['chunks']} chunks • "
+                    f"{doc_meta['documents']} pages"
                 )
 
-                # Show document info if available
-                doc_meta = thread_document_metadata(thread_key)
-                if doc_meta:
-                    st.caption(
-                        f"📄 `{doc_meta['filename']}` • "
-                        f"{doc_meta['chunks']} chunks • "
-                        f"{doc_meta['documents']} pages"
-                    )
-
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-                st.error("Please check if your Google API key is set correctly in Streamlit secrets.")
-                # Remove the failed user message
-                if st.session_state["message_history"][-1]["role"] == "user":
-                    st.session_state["message_history"].pop()
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.error("**Full error details:**")
+            st.code(str(e))
+            import traceback
+            st.code(traceback.format_exc())
+            
+            # Remove the failed user message
+            if st.session_state["message_history"][-1]["role"] == "user":
+                st.session_state["message_history"].pop()
     
     st.session_state["processing"] = False
     st.rerun()

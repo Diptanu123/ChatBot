@@ -34,7 +34,7 @@ load_dotenv()
 try:
     GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY"))
     if not GOOGLE_API_KEY:
-        st.error("âš ï¸ GOOGLE_API_KEY not found! Please add it to Streamlit secrets.")
+        st.error("⚠️ GOOGLE_API_KEY not found! Please add it to Streamlit secrets.")
         st.stop()
 except Exception as e:
     st.error(f"Error loading secrets: {e}")
@@ -48,9 +48,10 @@ ALPHA_VANTAGE_KEY = st.secrets.get("ALPHA_VANTAGE_KEY", os.getenv("ALPHA_VANTAGE
 try:
     llm = ChatGoogleGenerativeAI(
         model="gemini-2.0-flash-exp",
-        temperature=0,
+        temperature=0.7,  # Increased for more natural responses
         google_api_key=GOOGLE_API_KEY,
     )
+    print("✅ LLM initialized successfully")
 except Exception as e:
     st.error(f"Error initializing LLM: {e}")
     st.error("Please check your GOOGLE_API_KEY in Streamlit secrets")
@@ -189,7 +190,6 @@ def rag_tool(query: str, config: RunnableConfig) -> dict:
 
 
 tools = [calculator, get_stock_price, rag_tool]
-llm_with_tools = llm.bind_tools(tools)
 
 # --------------------------------------------------
 # State
@@ -198,18 +198,23 @@ class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 # --------------------------------------------------
-# Node
+# Node Functions
 # --------------------------------------------------
-def chat_node(state: ChatState, config=None):
+def chat_node(state: ChatState, config: RunnableConfig = None):
+    """Main chat node that processes messages and decides whether to use tools."""
+    print(f"🔵 chat_node called with {len(state['messages'])} messages")
+    
     thread_id = None
     if config and "configurable" in config:
         thread_id = config["configurable"].get("thread_id")
+        print(f"📌 Thread ID: {thread_id}")
 
     has_pdf = thread_id and _get_retriever(thread_id) is not None
     pdf_info = ""
     if has_pdf:
         meta = _THREAD_METADATA.get(str(thread_id), {})
         pdf_info = f"\nA PDF document '{meta.get('filename', 'unknown')}' has been uploaded. Use rag_tool to answer questions about it."
+        print(f"📄 PDF available: {meta.get('filename')}")
 
     system = SystemMessage(
         content=(
@@ -219,15 +224,29 @@ def chat_node(state: ChatState, config=None):
             "When users ask about documents, uploaded files, or PDFs, use the rag_tool.\n"
             "For calculations, use the calculator tool.\n"
             "For stock prices, use the get_stock_price tool.\n"
-            "Always be helpful and friendly."
+            "Always be helpful and friendly. Answer casual greetings naturally without using tools."
         )
     )
 
-    response = llm_with_tools.invoke(
-        [system, *state["messages"]],
-        config=config,
-    )
-    return {"messages": [response]}
+    try:
+        # Bind tools to LLM
+        llm_with_tools = llm.bind_tools(tools)
+        
+        # Invoke LLM
+        print("🤖 Invoking LLM...")
+        response = llm_with_tools.invoke(
+            [system, *state["messages"]],
+            config=config,
+        )
+        print(f"✅ LLM responded with: {response.content[:100]}...")
+        
+        return {"messages": [response]}
+    except Exception as e:
+        print(f"❌ Error in chat_node: {e}")
+        # Return error message to user
+        from langchain_core.messages import AIMessage
+        error_msg = AIMessage(content=f"I encountered an error: {str(e)}. Please try again.")
+        return {"messages": [error_msg]}
 
 tool_node = ToolNode(tools)
 
@@ -241,6 +260,7 @@ def get_checkpointer():
     saver = SqliteSaver(conn)
     # Initialize the database schema
     saver.setup()
+    print(f"✅ Database initialized at: {db_path}")
     return saver, conn
 
 checkpointer, conn = get_checkpointer()
@@ -250,6 +270,7 @@ checkpointer, conn = get_checkpointer()
 # --------------------------------------------------
 @st.cache_resource
 def build_graph():
+    print("🔨 Building graph...")
     graph = StateGraph(ChatState)
     graph.add_node("chat_node", chat_node)
     graph.add_node("tools", tool_node)
@@ -258,7 +279,9 @@ def build_graph():
     graph.add_conditional_edges("chat_node", tools_condition)
     graph.add_edge("tools", "chat_node")
 
-    return graph.compile(checkpointer=checkpointer)
+    compiled = graph.compile(checkpointer=checkpointer)
+    print("✅ Graph compiled successfully")
+    return compiled
 
 chatbot = build_graph()
 
