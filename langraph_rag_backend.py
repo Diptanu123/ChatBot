@@ -326,21 +326,40 @@ print("🎯 Groq Chatbot ready")
 # Helpers
 # --------------------------------------------------
 def retrieve_all_threads():
+    """Retrieve all unique thread IDs from the database."""
     threads = set()
     try:
         cursor = conn.cursor()
+        
+        # Check if checkpoints table exists
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='checkpoints'")
-        if cursor.fetchone():
-            cursor.execute("PRAGMA table_info(checkpoints)")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            if 'checkpoint_ns' in columns:
-                cursor.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints")
-                for row in cursor.fetchall():
-                    if row[0]:
-                        threads.add(row[0])
+        if not cursor.fetchone():
+            return list(threads)
+        
+        # Get all columns in checkpoints table
+        cursor.execute("PRAGMA table_info(checkpoints)")
+        columns = {col[1] for col in cursor.fetchall()}
+        
+        # LangGraph stores thread_id in the thread_id column (newer versions)
+        # or in checkpoint_ns (older versions)
+        if 'thread_id' in columns:
+            cursor.execute("SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id IS NOT NULL")
+            for row in cursor.fetchall():
+                if row[0]:
+                    threads.add(row[0])
+        elif 'checkpoint_ns' in columns:
+            cursor.execute("SELECT DISTINCT checkpoint_ns FROM checkpoints WHERE checkpoint_ns IS NOT NULL AND checkpoint_ns != ''")
+            for row in cursor.fetchall():
+                if row[0]:
+                    threads.add(row[0])
+        
+        print(f"📋 Retrieved {len(threads)} threads from database")
+        
     except Exception as e:
-        st.error(f"Error retrieving threads: {e}")
+        print(f"Error retrieving threads: {e}")
+        import traceback
+        print(traceback.format_exc())
+    
     return list(threads)
 
 def thread_document_metadata(thread_id: str):
@@ -350,43 +369,49 @@ def delete_thread(thread_id: str) -> bool:
     """Delete a thread from the database and memory."""
     try:
         cursor = conn.cursor()
+        
+        # Get all tables
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         tables = [row[0] for row in cursor.fetchall()]
         
+        # Delete from checkpoints table
         if 'checkpoints' in tables:
             cursor.execute("PRAGMA table_info(checkpoints)")
-            columns = [col[1] for col in cursor.fetchall()]
+            columns = {col[1] for col in cursor.fetchall()}
             
+            # Try thread_id column first (newer LangGraph)
+            if 'thread_id' in columns:
+                cursor.execute("DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,))
+                print(f"🗑️ Deleted from checkpoints using thread_id: {thread_id}")
+            
+            # Also try checkpoint_ns (older LangGraph)
             if 'checkpoint_ns' in columns:
-                cursor.execute(
-                    "DELETE FROM checkpoints WHERE checkpoint_ns = ?",
-                    (thread_id,)
-                )
-            
-            if 'parent_checkpoint_ns' in columns:
-                cursor.execute(
-                    "DELETE FROM checkpoints WHERE parent_checkpoint_ns LIKE ?",
-                    (f"%{thread_id}%",)
-                )
+                cursor.execute("DELETE FROM checkpoints WHERE checkpoint_ns = ?", (thread_id,))
+                print(f"🗑️ Deleted from checkpoints using checkpoint_ns: {thread_id}")
         
+        # Delete from writes table if it exists
         if 'writes' in tables:
             cursor.execute("PRAGMA table_info(writes)")
-            write_columns = [col[1] for col in cursor.fetchall()]
+            write_columns = {col[1] for col in cursor.fetchall()}
+            
+            if 'thread_id' in write_columns:
+                cursor.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
             
             if 'checkpoint_ns' in write_columns:
-                cursor.execute(
-                    "DELETE FROM writes WHERE checkpoint_ns = ?",
-                    (thread_id,)
-                )
+                cursor.execute("DELETE FROM writes WHERE checkpoint_ns = ?", (thread_id,))
         
         conn.commit()
         
+        # Clean up memory
         _THREAD_RETRIEVERS.pop(str(thread_id), None)
         _THREAD_METADATA.pop(str(thread_id), None)
         
+        print(f"✅ Thread {thread_id} deleted successfully")
         return True
         
     except Exception as e:
-        st.error(f"Error deleting thread: {e}")
+        print(f"❌ Error deleting thread {thread_id}: {e}")
+        import traceback
+        print(traceback.format_exc())
         conn.rollback()
         return False

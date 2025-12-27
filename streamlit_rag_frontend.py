@@ -76,8 +76,11 @@ if "message_history" not in st.session_state:
 if "thread_id" not in st.session_state:
     st.session_state["thread_id"] = generate_thread_id()
 
-if "chat_threads" not in st.session_state:
+# Always refresh threads from database on page load
+# This ensures past conversations persist after refresh
+if "chat_threads" not in st.session_state or st.session_state.get("force_reload_threads", False):
     st.session_state["chat_threads"] = retrieve_all_threads()
+    st.session_state["force_reload_threads"] = False
 
 if "ingested_docs" not in st.session_state:
     st.session_state["ingested_docs"] = {}
@@ -86,6 +89,24 @@ if "processing" not in st.session_state:
     st.session_state["processing"] = False
 
 add_thread(st.session_state["thread_id"])
+
+# If current thread has no messages, try to load from database
+if not st.session_state["message_history"]:
+    messages = load_conversation(st.session_state["thread_id"])
+    if messages:
+        cleaned = []
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                cleaned.append(
+                    {"role": "user", "content": extract_text(msg.content)}
+                )
+            elif isinstance(msg, AIMessage):
+                text = extract_text(msg.content)
+                if text:
+                    cleaned.append(
+                        {"role": "assistant", "content": text}
+                    )
+        st.session_state["message_history"] = cleaned
 
 thread_key = str(st.session_state["thread_id"])
 thread_docs = st.session_state["ingested_docs"].setdefault(thread_key, {})
@@ -97,6 +118,13 @@ st.sidebar.markdown(f"**Thread ID:** `{thread_key[:8]}...`")
 
 if st.sidebar.button("➕ New Chat", use_container_width=True):
     reset_chat()
+    st.session_state["force_reload_threads"] = True
+    st.rerun()
+
+# Refresh button to manually reload threads
+if st.sidebar.button("🔄 Refresh Conversations", use_container_width=True):
+    st.session_state["chat_threads"] = retrieve_all_threads()
+    st.sidebar.success("✅ Refreshed!")
     st.rerun()
 
 # PDF Upload Section
@@ -142,8 +170,10 @@ st.sidebar.subheader("🕘 Past Conversations")
 threads = list(reversed(st.session_state["chat_threads"]))
 
 if not threads:
-    st.sidebar.write("No past conversations yet.")
+    st.sidebar.info("No past conversations yet.")
 else:
+    st.sidebar.caption(f"📊 {len(threads)} conversation(s) found")
+    
     for tid in threads:
         display_id = f"{tid[:8]}..."
         
@@ -176,11 +206,15 @@ else:
         if col2.button("🗑", key=f"delete-{tid}"):
             with st.spinner("Deleting..."):
                 if delete_thread(tid):
-                    st.session_state["chat_threads"].remove(tid)
+                    # Remove from session state
+                    if tid in st.session_state["chat_threads"]:
+                        st.session_state["chat_threads"].remove(tid)
                     st.session_state["ingested_docs"].pop(tid, None)
 
+                    # If deleting current thread, create new one
                     if tid == thread_key:
                         reset_chat()
+                        st.session_state["force_reload_threads"] = True
 
                     st.sidebar.success("✅ Deleted")
                     st.rerun()
